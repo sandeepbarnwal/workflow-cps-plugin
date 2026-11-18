@@ -48,6 +48,8 @@ import java.io.InterruptedIOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import jenkins.model.Jenkins;
 import jenkins.scm.api.SCMFileSystem;
@@ -70,6 +72,7 @@ import org.kohsuke.stapler.StaplerRequest2;
 @PersistIn(JOB)
 public class CpsScmFlowDefinition extends FlowDefinition {
 
+    private static final Logger LOGGER = Logger.getLogger(CpsScmFlowDefinition.class.getName());
     private static final HMACConfidentialKey CHECKOUT_DIR_KEY =
             new HMACConfidentialKey(CpsScmFlowDefinition.class, "filePathWithSuffix", 32);
 
@@ -183,6 +186,14 @@ public class CpsScmFlowDefinition extends FlowDefinition {
                 if (retryCount == 0) // all attempts failed
                 throw new AbortException("Maximum checkout retry attempts reached, aborting");
 
+                if (isCacheCorrupted(dir)) {
+                    try {
+                        listener.getLogger().println("Deleting corrupted cache " + dir + " before retry");
+                        dir.deleteRecursive();
+                    } catch (Exception e) {
+                        Functions.printStackTrace(e, listener.error("Failed to delete cache directory before retry"));
+                    }
+                }
                 listener.getLogger().println("Retrying after 10 seconds");
                 Thread.sleep(10000);
             }
@@ -207,6 +218,24 @@ public class CpsScmFlowDefinition extends FlowDefinition {
         CpsFlowExecution exec = new CpsFlowExecution(script, true, owner, hint);
         exec.flowStartNodeActions.add(new WorkspaceActionImpl(acquiredDir, null));
         return exec;
+    }
+
+    private static boolean isCacheCorrupted(FilePath cacheDir) {
+        try {
+            if (!cacheDir.exists()) return false;
+            FilePath dotGit = cacheDir.child(".git");
+            if (!dotGit.isDirectory()) return true;
+            FilePath head = dotGit.child("HEAD");
+            if (!head.exists() || head.length() == 0) return true;
+            if (dotGit.child("index.lock").exists()) return true;
+            FilePath index = dotGit.child("index");
+            // A valid git index starts with the DIRC magic number; minimum size is 12 bytes
+            if (index.exists() && index.length() < 12) return true;
+            return false;
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING, "Could not check git repo validity of " + cacheDir, e);
+            return false;
+        }
     }
 
     private FilePath getFilePathWithSuffix(FilePath baseWorkspace, SCM scm) {

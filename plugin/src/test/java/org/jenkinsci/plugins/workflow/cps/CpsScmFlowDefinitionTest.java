@@ -31,6 +31,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeFalse;
 
+import hudson.FilePath;
 import hudson.Functions;
 import hudson.model.ParametersAction;
 import hudson.model.ParametersDefinitionProperty;
@@ -338,5 +339,34 @@ public class CpsScmFlowDefinitionTest {
         WorkflowRun b = r.buildAndAssertStatus(Result.FAILURE, p);
         assertThat(b.getExecution(), nullValue());
         r.assertLogContains("Jenkinsfile references a file that is not inside " + r.jenkins.getWorkspaceFor(p), b);
+    }
+
+    @Test
+    public void corruptedScriptCacheIsAutoRecovered() throws Exception {
+        sampleRepo.init();
+        sampleRepo.write("Jenkinsfile", "echo 'hello from script'");
+        sampleRepo.git("add", "Jenkinsfile");
+        sampleRepo.git("commit", "--message=init");
+
+        WorkflowJob p = r.jenkins.createProject(WorkflowJob.class, "p");
+        GitStep step = new GitStep(sampleRepo.toString());
+        CpsScmFlowDefinition def = new CpsScmFlowDefinition(step.createSCM(), "Jenkinsfile");
+        def.setLightweight(false);
+        p.setDefinition(def);
+        r.jenkins.setScmCheckoutRetryCount(1);
+
+        // First build seeds the @script cache
+        r.assertBuildStatusSuccess(p.scheduleBuild2(0));
+
+        // Locate the @script cache dir (a directory, not the -scm-key.txt sibling) and corrupt its .git/index
+        FilePath scriptBase = r.jenkins.getWorkspaceFor(p).withSuffix("@script");
+        java.util.List<FilePath> scriptDirs = scriptBase.listDirectories();
+        assertTrue(scriptDirs.size() > 0);
+        FilePath cacheDir = scriptDirs.get(0);
+        cacheDir.child(".git/index").write("CORRUPTED", "UTF-8");
+
+        // Second build should recover automatically instead of failing permanently
+        WorkflowRun b = r.assertBuildStatusSuccess(p.scheduleBuild2(0));
+        r.assertLogContains("hello from script", b);
     }
 }
